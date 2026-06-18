@@ -94,6 +94,8 @@ class LspClient {
     this.readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS;
     this.readyWaiters = new Set();
     this.lastStatus = null;
+    this.diagnostics = new Map();
+    this.startedAt = Date.now();
 
     const safeName = workspaceStateName(this.workspaceRoot);
     const baseDir = process.env.JDTLS_MCP_STATE_DIR || path.join(os.tmpdir(), "jdtls-mcp");
@@ -219,6 +221,21 @@ class LspClient {
         });
       }
       this.refreshReadinessState();
+      return;
+    }
+
+    if (method === "textDocument/publishDiagnostics" && params && typeof params === "object") {
+      try {
+        const filePath = resolveWorkspaceFile(this.workspaceRoot, pathFromUri(params.uri));
+        const diagnostics = Array.isArray(params.diagnostics) ? params.diagnostics : [];
+        if (diagnostics.length === 0) {
+          this.diagnostics.delete(filePath);
+        } else {
+          this.diagnostics.set(filePath, diagnostics);
+        }
+      } catch (error) {
+        log(`ignoring invalid diagnostics notification: ${error.message}`);
+      }
     }
   }
 
@@ -281,6 +298,36 @@ class LspClient {
     }
     const data = await operation();
     return { data, meta: this.queryMeta(wait) };
+  }
+
+  diagnosticsSnapshot(filePath) {
+    if (filePath) {
+      const absolutePath = resolveWorkspaceFile(this.workspaceRoot, filePath);
+      return (this.diagnostics.get(absolutePath) || []).map((diagnostic) =>
+        simplifyDiagnostic(absolutePath, diagnostic));
+    }
+    return [...this.diagnostics.entries()].flatMap(([diagnosticPath, diagnostics]) =>
+      diagnostics.map((diagnostic) => simplifyDiagnostic(diagnosticPath, diagnostic)));
+  }
+
+  statusSnapshot() {
+    const diagnostics = this.diagnosticsSnapshot();
+    return {
+      running: this.state !== "stopped",
+      workspaceRoot: this.workspaceRoot,
+      state: this.state,
+      ready: this.state === "ready",
+      indexing: this.state === "starting" || this.state === "indexing",
+      pid: this.proc?.pid || null,
+      uptimeMs: Date.now() - this.startedAt,
+      lastStatus: this.lastStatus,
+      activeTasks: [...this.activeProgress.values()],
+      pendingRequests: this.pending.size,
+      openDocuments: this.openDocs.size,
+      diagnosticFiles: this.diagnostics.size,
+      diagnosticIssues: diagnostics.length,
+      readyTimeoutMs: this.readyTimeoutMs,
+    };
   }
 
   handleServerRequest(method, params) {
@@ -565,6 +612,19 @@ function simplifyDocumentSymbol(symbol) {
   return base;
 }
 
+function simplifyDiagnostic(filePath, diagnostic) {
+  return {
+    path: filePath,
+    range: rangeToText(diagnostic.range),
+    severity: diagnostic.severity,
+    code: diagnostic.code && typeof diagnostic.code === "object"
+      ? diagnostic.code.value
+      : diagnostic.code,
+    source: diagnostic.source,
+    message: diagnostic.message || "",
+  };
+}
+
 function formatResult(value) {
   return {
     content: [
@@ -640,6 +700,21 @@ const tools = [
       workspaceRoot: { type: "string", description: "Absolute project root path." },
     }, ["workspaceRoot"]),
   },
+  {
+    name: "jdtls_status",
+    description: "Inspect a cached JDT.LS session without starting one.",
+    inputSchema: toolSchema({
+      workspaceRoot: { type: "string", description: "Absolute project root path." },
+    }, ["workspaceRoot"]),
+  },
+  {
+    name: "jdtls_diagnostics",
+    description: "Return cached Java diagnostics for a workspace or one Java file.",
+    inputSchema: toolSchema({
+      workspaceRoot: { type: "string", description: "Absolute project root path." },
+      filePath: { type: "string", description: "Optional absolute Java file path." },
+    }, ["workspaceRoot"]),
+  },
 ];
 
 async function callTool(name, args) {
@@ -696,6 +771,23 @@ async function callTool(name, args) {
         { context: { includeDeclaration: Boolean(args.includeDeclaration) } },
       );
       return (data || []).map(simplifyLocation);
+    });
+    return formatResult(result);
+  }
+  if (name === "jdtls_status") {
+    const root = normalizePath(args.workspaceRoot);
+    if (!sessions.has(root)) {
+      return formatResult({ running: false, workspaceRoot: root });
+    }
+    return formatResult(sessions.get(root).statusSnapshot());
+  }
+  if (name === "jdtls_diagnostics") {
+    const session = getSession(args.workspaceRoot);
+    const result = await session.runSemanticQuery(async () => {
+      if (args.filePath) {
+        await session.syncDocument(args.filePath);
+      }
+      return session.diagnosticsSnapshot(args.filePath);
     });
     return formatResult(result);
   }
@@ -774,8 +866,10 @@ function main() {
 
 module.exports = {
   LspClient,
+  callTool,
   createJsonRpcParser,
   resolveWorkspaceFile,
+  sessions,
   splitArgs,
   workspaceStateName,
 };

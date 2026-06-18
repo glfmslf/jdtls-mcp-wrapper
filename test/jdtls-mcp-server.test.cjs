@@ -250,3 +250,70 @@ test("server request handler returns current workspace folders", () => {
     }],
   );
 });
+
+test("publishDiagnostics updates and clears normalized diagnostics", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "jdtls-root-"));
+  const file = path.join(root, "Example.java");
+  fs.writeFileSync(file, "class Example {}\n");
+  const client = createClientDouble({
+    workspaceRoot: root,
+    diagnostics: new Map(),
+  });
+
+  client.handleNotification("textDocument/publishDiagnostics", {
+    uri: new URL(`file://${file}`).toString(),
+    diagnostics: [{
+      range: {
+        start: { line: 0, character: 6 },
+        end: { line: 0, character: 13 },
+      },
+      severity: 1,
+      code: "123",
+      source: "Java",
+      message: "Example error",
+    }],
+  });
+
+  assert.deepEqual(client.diagnosticsSnapshot(file), [{
+    path: fs.realpathSync(file),
+    range: "1:7-1:14",
+    severity: 1,
+    code: "123",
+    source: "Java",
+    message: "Example error",
+  }]);
+
+  client.handleNotification("textDocument/publishDiagnostics", {
+    uri: new URL(`file://${file}`).toString(),
+    diagnostics: [],
+  });
+  assert.deepEqual(client.diagnosticsSnapshot(file), []);
+  assert.equal(client.diagnostics.size, 0);
+});
+
+test("diagnostics path must stay inside workspace", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "jdtls-root-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "jdtls-outside-"));
+  const outsideFile = path.join(outside, "Outside.java");
+  fs.writeFileSync(outsideFile, "class Outside {}\n");
+  const client = createClientDouble({
+    workspaceRoot: root,
+    diagnostics: new Map(),
+  });
+
+  assert.throws(
+    () => client.diagnosticsSnapshot(outsideFile),
+    /must be inside workspaceRoot/,
+  );
+});
+
+test("jdtls_status reports stopped workspace without creating session", async () => {
+  server.sessions.clear();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "jdtls-root-"));
+
+  const response = await server.callTool("jdtls_status", { workspaceRoot: root });
+  const status = JSON.parse(response.content[0].text);
+
+  assert.deepEqual(status, { running: false, workspaceRoot: root });
+  assert.equal(server.sessions.size, 0);
+});
