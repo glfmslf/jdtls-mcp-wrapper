@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "jdtlsLsp": {
+      "title": "JDTLS LSP",
+      "description": "Eclipse JDT.LS Java symbol, definition, implementation, and reference lookup.",
+      "cwd": ".",
+      "command": "node",
+      "args": [
+        "./mcp/jdtls-mcp-server.cjs",
+        "--stdio"
+      ]
+    }
+  }
+}

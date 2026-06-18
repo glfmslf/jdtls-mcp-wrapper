@@ -1,0 +1,34 @@
+{
+  "name": "jdtls-mcp-wrapper",
+  "version": "0.2.0",
+  "description": "Expose Eclipse JDT.LS Java navigation as MCP tools for Codex.",
+  "author": {
+    "name": "youyu"
+  },
+  "license": "MIT",
+  "keywords": [
+    "java",
+    "jdtls",
+    "lsp",
+    "mcp",
+    "definition",
+    "references"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "JDTLS MCP Wrapper",
+    "shortDescription": "Java LSP navigation tools for Codex",
+    "longDescription": "Starts Eclipse JDT.LS behind an MCP stdio server and exposes Java symbol search, document symbols, definition, implementation, and references tools.",
+    "developerName": "youyu",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "defaultPrompt": [
+      "Use JDT.LS to find a Java symbol definition",
+      "Find implementations and references for this Java method",
+      "List document symbols for a Java file"
+    ]
+  }
+}
