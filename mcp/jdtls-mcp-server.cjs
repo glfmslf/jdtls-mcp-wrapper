@@ -10,7 +10,9 @@ const { pathToFileURL, fileURLToPath } = require("url");
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.JDTLS_MCP_TIMEOUT_MS || 20000);
 const DEFAULT_READY_TIMEOUT_MS = Number(process.env.JDTLS_MCP_READY_TIMEOUT_MS || 30000);
+const DEFAULT_IDLE_TIMEOUT_MS = Number(process.env.JDTLS_MCP_IDLE_TIMEOUT_MS || 600000);
 const sessions = new Map();
+let cleanupTimer = null;
 
 function log(message) {
   process.stderr.write(`[jdtls-mcp] ${message}\n`);
@@ -96,6 +98,8 @@ class LspClient {
     this.lastStatus = null;
     this.diagnostics = new Map();
     this.startedAt = Date.now();
+    this.lastActivityAt = this.startedAt;
+    this.idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS;
 
     const safeName = workspaceStateName(this.workspaceRoot);
     const baseDir = process.env.JDTLS_MCP_STATE_DIR || path.join(os.tmpdir(), "jdtls-mcp");
@@ -291,13 +295,30 @@ class LspClient {
   }
 
   async runSemanticQuery(operation) {
+    this.touch();
     let wait = { waitTimedOut: false, waitedMs: 0 };
     if (!this.firstQueryWaited) {
       this.firstQueryWaited = true;
       wait = await this.waitForReadiness();
     }
-    const data = await operation();
-    return { data, meta: this.queryMeta(wait) };
+    try {
+      const data = await operation();
+      return { data, meta: this.queryMeta(wait) };
+    } finally {
+      this.touch();
+    }
+  }
+
+  touch(now = Date.now()) {
+    this.lastActivityAt = now;
+  }
+
+  isIdleExpired(now = Date.now()) {
+    return this.idleTimeoutMs > 0
+      && !this.closing
+      && this.state !== "stopped"
+      && this.pending.size === 0
+      && now - this.lastActivityAt >= this.idleTimeoutMs;
   }
 
   diagnosticsSnapshot(filePath) {
@@ -326,7 +347,9 @@ class LspClient {
       openDocuments: this.openDocs.size,
       diagnosticFiles: this.diagnostics.size,
       diagnosticIssues: diagnostics.length,
+      lastActivityAt: this.lastActivityAt,
       readyTimeoutMs: this.readyTimeoutMs,
+      idleTimeoutMs: this.idleTimeoutMs,
     };
   }
 
@@ -353,6 +376,7 @@ class LspClient {
   }
 
   request(method, params, timeoutMs = DEFAULT_TIMEOUT_MS) {
+    this.touch();
     const id = this.nextId++;
     const message = { jsonrpc: "2.0", id, method, params };
     const promise = new Promise((resolve, reject) => {
@@ -401,6 +425,7 @@ class LspClient {
   }
 
   async syncDocument(filePath) {
+    this.touch();
     await this.ready;
     const absolutePath = resolveWorkspaceFile(this.workspaceRoot, filePath);
     const uri = uriFromPath(absolutePath);
@@ -558,7 +583,34 @@ function getSession(workspaceRoot) {
   if (!sessions.has(root)) {
     sessions.set(root, new LspClient(root));
   }
-  return sessions.get(root);
+  const session = sessions.get(root);
+  session.touch();
+  return session;
+}
+
+async function reapIdleSessions(sessionMap = sessions, now = Date.now()) {
+  for (const [root, session] of [...sessionMap.entries()]) {
+    if (!session.isIdleExpired(now)) continue;
+    await session.shutdown();
+    if (sessionMap.get(root) === session) {
+      sessionMap.delete(root);
+    }
+  }
+}
+
+function startSessionCleanup() {
+  if (cleanupTimer || DEFAULT_IDLE_TIMEOUT_MS <= 0) return;
+  const intervalMs = Math.max(1000, Math.min(DEFAULT_IDLE_TIMEOUT_MS, 60000));
+  cleanupTimer = setInterval(() => {
+    reapIdleSessions().catch((error) => log(`idle session cleanup failed: ${error.message}`));
+  }, intervalMs);
+  cleanupTimer.unref();
+}
+
+function stopSessionCleanup() {
+  if (!cleanupTimer) return;
+  clearInterval(cleanupTimer);
+  cleanupTimer = null;
 }
 
 function rangeToText(range) {
@@ -839,11 +891,13 @@ async function handleMcp(message) {
 }
 
 async function shutdownAll(exitCode) {
+  stopSessionCleanup();
   await Promise.allSettled([...sessions.values()].map((session) => session.shutdown()));
   process.exit(exitCode);
 }
 
 function main() {
+  startSessionCleanup();
   readJsonRpcMessages(
     process.stdin,
     async (message) => {
@@ -860,6 +914,7 @@ function main() {
     shutdownAll(143);
   });
   process.once("beforeExit", async () => {
+    stopSessionCleanup();
     await Promise.allSettled([...sessions.values()].map((session) => session.shutdown()));
   });
 }
@@ -868,6 +923,7 @@ module.exports = {
   LspClient,
   callTool,
   createJsonRpcParser,
+  reapIdleSessions,
   resolveWorkspaceFile,
   sessions,
   splitArgs,

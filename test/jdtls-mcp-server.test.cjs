@@ -317,3 +317,48 @@ test("jdtls_status reports stopped workspace without creating session", async ()
   assert.deepEqual(status, { running: false, workspaceRoot: root });
   assert.equal(server.sessions.size, 0);
 });
+
+test("idle expiration requires no pending requests", () => {
+  const client = createClientDouble({
+    lastActivityAt: 100,
+    idleTimeoutMs: 50,
+    pending: new Map(),
+    closing: false,
+  });
+
+  assert.equal(client.isIdleExpired(151), true);
+  client.pending.set(1, {});
+  assert.equal(client.isIdleExpired(1000), false);
+});
+
+test("touch refreshes session activity", () => {
+  const client = createClientDouble({ lastActivityAt: 100 });
+
+  client.touch(250);
+
+  assert.equal(client.lastActivityAt, 250);
+});
+
+test("idle reaper gracefully shuts down expired sessions", async () => {
+  let shutdowns = 0;
+  const sessionMap = new Map([
+    ["/expired", {
+      isIdleExpired: () => true,
+      shutdown: async () => {
+        shutdowns += 1;
+      },
+    }],
+    ["/active", {
+      isIdleExpired: () => false,
+      shutdown: async () => {
+        throw new Error("active session must not be shut down");
+      },
+    }],
+  ]);
+
+  await server.reapIdleSessions(sessionMap, 1000);
+
+  assert.equal(shutdowns, 1);
+  assert.equal(sessionMap.has("/expired"), false);
+  assert.equal(sessionMap.has("/active"), true);
+});
