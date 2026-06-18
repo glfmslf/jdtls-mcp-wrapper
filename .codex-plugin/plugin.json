@@ -1,6 +1,6 @@
 {
   "name": "jdtls-mcp-wrapper",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Expose Eclipse JDT.LS Java navigation as MCP tools for Codex.",
   "author": {
     "name": "youyu"
@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "JDTLS MCP Wrapper",
     "shortDescription": "Java LSP navigation tools for Codex",
-    "longDescription": "Starts Eclipse JDT.LS behind an MCP stdio server and exposes Java symbol search, document symbols, definition, implementation, and references tools.",
+    "longDescription": "Starts Eclipse JDT.LS behind an MCP stdio server and exposes Java navigation, readiness status, and diagnostics tools.",
     "developerName": "youyu",
     "category": "Developer Tools",
     "capabilities": [

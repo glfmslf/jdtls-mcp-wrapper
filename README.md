@@ -9,7 +9,28 @@ Codex 插件原型：通过 MCP stdio server 启动 Eclipse JDT.LS，并把 Java
 - `jdtls_definition`：从指定位置跳到定义
 - `jdtls_implementation`：查实现
 - `jdtls_references`：查引用
+- `jdtls_status`：查看会话、索引、进度、请求和诊断状态，不会启动新会话
+- `jdtls_diagnostics`：读取工作区或单文件的 Java 诊断
 - `jdtls_shutdown`：关闭某个 workspace 的 jdtls session
+
+语义查询返回：
+
+```json
+{
+  "data": [],
+  "meta": {
+    "state": "ready",
+    "indexing": false,
+    "ready": true,
+    "waitTimedOut": false,
+    "waitedMs": 1200,
+    "activeTasks": []
+  }
+}
+```
+
+首次语义查询最多等待 JDT.LS 就绪 30 秒。超时后仍返回当前查询结果，并通过
+`meta.indexing` 和 `meta.waitTimedOut` 标明状态。
 
 ## 依赖
 
@@ -52,6 +73,8 @@ node --test test/jdtls-mcp-server.test.cjs
 - 每个工作区使用带哈希的独立 JDT.LS 状态目录
 - 关闭时等待 `shutdown` 响应，再发送 `exit`，超时后才强制终止
 - `JDTLS_ARGS` 支持单双引号、反斜杠转义和空参数
+- LSP 请求超时后发送 `$/cancelRequest`
+- 空闲会话默认 10 分钟后自动优雅关闭
 
 ## 环境变量
 
@@ -62,6 +85,8 @@ node --test test/jdtls-mcp-server.test.cjs
 - `JDTLS_WORKSPACE_DIR`：覆盖 `-data`
 - `JDTLS_MCP_TIMEOUT_MS`：普通 LSP 请求超时，默认 20000ms
 - `JDTLS_MCP_INIT_TIMEOUT_MS`：初始化超时，默认 60000ms
+- `JDTLS_MCP_READY_TIMEOUT_MS`：首次语义查询等待就绪的上限，默认 30000ms
+- `JDTLS_MCP_IDLE_TIMEOUT_MS`：会话空闲回收时间，默认 600000ms；设为 0 可禁用
 
 ## 坐标约定
 

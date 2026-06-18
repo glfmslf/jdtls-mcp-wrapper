@@ -57,13 +57,16 @@ child.stdout.on("data", (chunk) => {
 
 (async () => {
   const initialized = await send("initialize", {});
-  if (initialized.serverInfo.version !== "0.2.0") throw new Error("unexpected server version");
+  if (initialized.serverInfo.version !== "0.3.0") throw new Error("unexpected server version");
 
   const first = await send("tools/call", {
     name: "jdtls_document_symbol",
     arguments: { workspaceRoot, filePath },
   });
-  if (!first.content[0].text.includes("hello")) throw new Error("initial symbol lookup failed");
+  const firstResult = JSON.parse(first.content[0].text);
+  if (!JSON.stringify(firstResult.data).includes("hello")) throw new Error("initial symbol lookup failed");
+  if (typeof firstResult.meta.indexing !== "boolean") throw new Error("missing indexing metadata");
+  if (typeof firstResult.meta.waitTimedOut !== "boolean") throw new Error("missing wait metadata");
 
   fs.writeFileSync(
     filePath,
@@ -73,7 +76,26 @@ child.stdout.on("data", (chunk) => {
     name: "jdtls_document_symbol",
     arguments: { workspaceRoot, filePath },
   });
-  if (!second.content[0].text.includes("count")) throw new Error("didChange synchronization failed");
+  const secondResult = JSON.parse(second.content[0].text);
+  if (!JSON.stringify(secondResult.data).includes("count")) throw new Error("didChange synchronization failed");
+
+  const statusResponse = await send("tools/call", {
+    name: "jdtls_status",
+    arguments: { workspaceRoot },
+  });
+  const status = JSON.parse(statusResponse.content[0].text);
+  if (!status.running || typeof status.indexing !== "boolean") {
+    throw new Error("status tool returned an invalid response");
+  }
+
+  const diagnosticsResponse = await send("tools/call", {
+    name: "jdtls_diagnostics",
+    arguments: { workspaceRoot, filePath },
+  });
+  const diagnostics = JSON.parse(diagnosticsResponse.content[0].text);
+  if (!Array.isArray(diagnostics.data) || typeof diagnostics.meta.indexing !== "boolean") {
+    throw new Error("diagnostics tool returned an invalid response");
+  }
 
   await send("tools/call", {
     name: "jdtls_shutdown",

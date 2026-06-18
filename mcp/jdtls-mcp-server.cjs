@@ -403,6 +403,9 @@ class LspClient {
       rootUri,
       workspaceFolders: [{ uri: rootUri, name: path.basename(this.workspaceRoot) }],
       capabilities: {
+        window: {
+          workDoneProgress: true,
+        },
         workspace: {
           workspaceFolders: true,
           symbol: { dynamicRegistration: false },
@@ -864,7 +867,7 @@ async function handleMcp(message) {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "jdtls-mcp-wrapper", version: "0.2.0" },
+          serverInfo: { name: "jdtls-mcp-wrapper", version: "0.3.0" },
         },
       };
     }
