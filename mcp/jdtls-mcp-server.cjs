@@ -290,6 +290,15 @@ class LspClient {
     if (method === "client/registerCapability" || method === "client/unregisterCapability") {
       return null;
     }
+    if (method === "window/workDoneProgress/create") {
+      return null;
+    }
+    if (method === "workspace/workspaceFolders") {
+      return [{
+        uri: uriFromPath(this.workspaceRoot),
+        name: path.basename(this.workspaceRoot),
+      }];
+    }
     if (method === "workspace/applyEdit") {
       return { applied: false, failureReason: "jdtls-mcp-wrapper is read-only" };
     }
@@ -302,6 +311,7 @@ class LspClient {
     const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        this.notify("$/cancelRequest", { id });
         reject(new Error(`LSP request timed out: ${method}`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });

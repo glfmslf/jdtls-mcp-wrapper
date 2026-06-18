@@ -211,3 +211,42 @@ test("readiness timeout still runs query and only first query waits", async () =
   assert.equal(second.meta.waitTimedOut, false);
   assert.ok(Date.now() - secondStarted < 10);
 });
+
+test("timed out LSP request sends cancel notification", async () => {
+  const writes = [];
+  const client = createClientDouble({
+    nextId: 1,
+    pending: new Map(),
+    proc: { stdin: { write: (chunk) => writes.push(Buffer.from(chunk)) } },
+  });
+
+  await assert.rejects(
+    client.request("workspace/symbol", { query: "Missing" }, 5),
+    /timed out/,
+  );
+
+  const output = Buffer.concat(writes).toString("utf8");
+  assert.match(output, /"\$\/cancelRequest"/);
+  assert.match(output, /"params":\{"id":1\}/);
+});
+
+test("server request handler accepts work done progress creation", () => {
+  const client = createClientDouble();
+
+  assert.equal(
+    client.handleServerRequest("window/workDoneProgress/create", { token: "import" }),
+    null,
+  );
+});
+
+test("server request handler returns current workspace folders", () => {
+  const client = createClientDouble({ workspaceRoot: "/tmp/my-project" });
+
+  assert.deepEqual(
+    client.handleServerRequest("workspace/workspaceFolders", {}),
+    [{
+      uri: "file:///tmp/my-project",
+      name: "my-project",
+    }],
+  );
+});
