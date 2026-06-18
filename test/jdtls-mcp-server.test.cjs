@@ -122,3 +122,92 @@ test("syncDocument sends didChange when disk content changes", async () => {
   );
   assert.equal(notifications[1].params.textDocument.version, 2);
 });
+
+function createClientDouble(overrides = {}) {
+  const client = Object.create(server.LspClient.prototype);
+  Object.assign(client, {
+    workspaceRoot: "/tmp/workspace",
+    state: "indexing",
+    serviceReady: false,
+    activeProgress: new Map(),
+    firstQueryWaited: false,
+    readyTimeoutMs: 20,
+    lastStatus: null,
+    readyWaiters: new Set(),
+    ...overrides,
+  });
+  return client;
+}
+
+test("ServiceReady status moves client to ready when no progress is active", () => {
+  const client = createClientDouble();
+
+  client.handleNotification("language/status", {
+    type: "ServiceReady",
+    message: "ServiceReady",
+  });
+
+  assert.equal(client.state, "ready");
+  assert.equal(client.serviceReady, true);
+});
+
+test("active progress keeps a ServiceReady client indexing until completion", () => {
+  const client = createClientDouble();
+
+  client.handleNotification("language/progressReport", {
+    id: "import",
+    task: "Importing Maven project(s)",
+    complete: false,
+  });
+  client.handleNotification("language/status", {
+    type: "ServiceReady",
+    message: "ServiceReady",
+  });
+  assert.equal(client.state, "indexing");
+
+  client.handleNotification("language/progressReport", {
+    id: "import",
+    task: "Importing Maven project(s)",
+    complete: true,
+  });
+  assert.equal(client.state, "ready");
+});
+
+test("first semantic query waits for readiness and returns ready metadata", async () => {
+  const client = createClientDouble({ readyTimeoutMs: 100 });
+  const query = client.runSemanticQuery(async () => ["result"]);
+  setImmediate(() => {
+    client.handleNotification("language/status", {
+      type: "ServiceReady",
+      message: "ServiceReady",
+    });
+  });
+
+  const result = await query;
+
+  assert.deepEqual(result.data, ["result"]);
+  assert.equal(result.meta.ready, true);
+  assert.equal(result.meta.indexing, false);
+  assert.equal(result.meta.waitTimedOut, false);
+});
+
+test("readiness timeout still runs query and only first query waits", async () => {
+  const client = createClientDouble({ readyTimeoutMs: 10 });
+  let calls = 0;
+
+  const first = await client.runSemanticQuery(async () => {
+    calls += 1;
+    return ["first"];
+  });
+  const secondStarted = Date.now();
+  const second = await client.runSemanticQuery(async () => {
+    calls += 1;
+    return ["second"];
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(first.meta.indexing, true);
+  assert.equal(first.meta.waitTimedOut, true);
+  assert.equal(second.meta.waitTimedOut, false);
+  assert.ok(Date.now() - secondStarted < 10);
+});

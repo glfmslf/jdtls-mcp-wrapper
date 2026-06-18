@@ -9,6 +9,7 @@ const { spawn } = require("child_process");
 const { pathToFileURL, fileURLToPath } = require("url");
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.JDTLS_MCP_TIMEOUT_MS || 20000);
+const DEFAULT_READY_TIMEOUT_MS = Number(process.env.JDTLS_MCP_READY_TIMEOUT_MS || 30000);
 const sessions = new Map();
 
 function log(message) {
@@ -86,6 +87,13 @@ class LspClient {
     this.pending = new Map();
     this.openDocs = new Map();
     this.closing = false;
+    this.state = "starting";
+    this.serviceReady = false;
+    this.activeProgress = new Map();
+    this.firstQueryWaited = false;
+    this.readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS;
+    this.readyWaiters = new Set();
+    this.lastStatus = null;
 
     const safeName = workspaceStateName(this.workspaceRoot);
     const baseDir = process.env.JDTLS_MCP_STATE_DIR || path.join(os.tmpdir(), "jdtls-mcp");
@@ -106,10 +114,14 @@ class LspClient {
 
     this.proc.stderr.on("data", (chunk) => log(chunk.toString("utf8").trimEnd()));
     this.proc.on("error", (error) => {
+      this.state = "error";
+      this.resolveReadyWaiters();
       this.rejectPending(new Error(`failed to start jdtls: ${error.message}`));
     });
     this.proc.on("exit", (code, signal) => {
       const reason = signal ? `signal ${signal}` : `code ${code}`;
+      this.state = "stopped";
+      this.resolveReadyWaiters();
       this.rejectPending(new Error(`jdtls exited with ${reason}`));
       sessions.delete(this.workspaceRoot);
       log(`jdtls exited for ${this.workspaceRoot}: ${reason}`);
@@ -156,7 +168,119 @@ class LspClient {
             error: { code: -32603, message: error.message },
           });
         });
+      return;
     }
+
+    if (message.method) {
+      this.handleNotification(message.method, message.params);
+    }
+  }
+
+  handleNotification(method, params) {
+    if (method === "language/status" && params && typeof params === "object") {
+      this.lastStatus = {
+        type: typeof params.type === "string" ? params.type : "",
+        message: typeof params.message === "string" ? params.message : "",
+      };
+      if (params.type === "ServiceReady") {
+        this.serviceReady = true;
+      } else if (params.type === "Error") {
+        this.state = "error";
+      }
+      this.refreshReadinessState();
+      return;
+    }
+
+    if (method === "language/progressReport" && params && typeof params === "object") {
+      const id = String(params.id ?? params.progressId ?? params.task ?? "jdtls-progress");
+      if (params.complete) {
+        this.activeProgress.delete(id);
+      } else {
+        this.activeProgress.set(id, {
+          id,
+          task: params.task || "",
+          status: params.status || params.subTask || "",
+        });
+      }
+      this.refreshReadinessState();
+      return;
+    }
+
+    if (method === "$/progress" && params && typeof params === "object") {
+      const id = String(params.token ?? "work-done-progress");
+      const value = params.value || {};
+      if (value.kind === "end") {
+        this.activeProgress.delete(id);
+      } else if (value.kind === "begin" || value.kind === "report") {
+        this.activeProgress.set(id, {
+          id,
+          task: value.title || "",
+          status: value.message || "",
+        });
+      }
+      this.refreshReadinessState();
+    }
+  }
+
+  refreshReadinessState() {
+    if (this.state === "error" || this.state === "closing" || this.state === "stopped") {
+      this.resolveReadyWaiters();
+      return;
+    }
+    this.state = this.serviceReady && this.activeProgress.size === 0 ? "ready" : "indexing";
+    if (this.state === "ready") {
+      this.resolveReadyWaiters();
+    }
+  }
+
+  resolveReadyWaiters() {
+    for (const resolve of this.readyWaiters || []) {
+      resolve();
+    }
+    this.readyWaiters?.clear();
+  }
+
+  async waitForReadiness() {
+    const startedAt = Date.now();
+    if (this.state === "ready" || this.state === "error" || this.state === "stopped") {
+      return { waitTimedOut: false, waitedMs: 0 };
+    }
+
+    let waitTimedOut = false;
+    await new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        this.readyWaiters.delete(finish);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        waitTimedOut = true;
+        finish();
+      }, this.readyTimeoutMs);
+      this.readyWaiters.add(finish);
+    });
+    return { waitTimedOut, waitedMs: Date.now() - startedAt };
+  }
+
+  queryMeta(wait = { waitTimedOut: false, waitedMs: 0 }) {
+    return {
+      state: this.state,
+      indexing: this.state === "starting" || this.state === "indexing",
+      ready: this.state === "ready",
+      waitTimedOut: Boolean(wait.waitTimedOut),
+      waitedMs: wait.waitedMs || 0,
+      activeTasks: [...this.activeProgress.values()],
+    };
+  }
+
+  async runSemanticQuery(operation) {
+    let wait = { waitTimedOut: false, waitedMs: 0 };
+    if (!this.firstQueryWaited) {
+      this.firstQueryWaited = true;
+      wait = await this.waitForReadiness();
+    }
+    const data = await operation();
+    return { data, meta: this.queryMeta(wait) };
   }
 
   handleServerRequest(method, params) {
@@ -216,6 +340,7 @@ class LspClient {
       trace: "off",
     }, Number(process.env.JDTLS_MCP_INIT_TIMEOUT_MS || 60000));
     this.notify("initialized", {});
+    this.refreshReadinessState();
   }
 
   async syncDocument(filePath) {
@@ -272,6 +397,8 @@ class LspClient {
   async shutdown() {
     if (this.closing) return;
     this.closing = true;
+    this.state = "closing";
+    this.resolveReadyWaiters();
     try {
       await this.ready;
       await this.request("shutdown", {}, 3000);
@@ -507,40 +634,60 @@ const tools = [
 
 async function callTool(name, args) {
   if (name === "jdtls_workspace_symbol") {
-    const result = await getSession(args.workspaceRoot).workspaceSymbol(args.query);
-    return formatResult((result || []).map(simplifyLocation));
+    const session = getSession(args.workspaceRoot);
+    const result = await session.runSemanticQuery(async () => {
+      const data = await session.workspaceSymbol(args.query);
+      return (data || []).map(simplifyLocation);
+    });
+    return formatResult(result);
   }
   if (name === "jdtls_document_symbol") {
-    const result = await getSession(args.workspaceRoot).documentSymbol(args.filePath);
-    return formatResult((result || []).map(simplifyDocumentSymbol));
+    const session = getSession(args.workspaceRoot);
+    const result = await session.runSemanticQuery(async () => {
+      const data = await session.documentSymbol(args.filePath);
+      return (data || []).map(simplifyDocumentSymbol);
+    });
+    return formatResult(result);
   }
   if (name === "jdtls_definition") {
-    const result = await getSession(args.workspaceRoot).positionRequest(
-      "textDocument/definition",
-      args.filePath,
-      args.line,
-      args.character,
-    );
-    return formatResult((Array.isArray(result) ? result : [result]).filter(Boolean).map(simplifyLocation));
+    const session = getSession(args.workspaceRoot);
+    const result = await session.runSemanticQuery(async () => {
+      const data = await session.positionRequest(
+        "textDocument/definition",
+        args.filePath,
+        args.line,
+        args.character,
+      );
+      return (Array.isArray(data) ? data : [data]).filter(Boolean).map(simplifyLocation);
+    });
+    return formatResult(result);
   }
   if (name === "jdtls_implementation") {
-    const result = await getSession(args.workspaceRoot).positionRequest(
-      "textDocument/implementation",
-      args.filePath,
-      args.line,
-      args.character,
-    );
-    return formatResult((Array.isArray(result) ? result : [result]).filter(Boolean).map(simplifyLocation));
+    const session = getSession(args.workspaceRoot);
+    const result = await session.runSemanticQuery(async () => {
+      const data = await session.positionRequest(
+        "textDocument/implementation",
+        args.filePath,
+        args.line,
+        args.character,
+      );
+      return (Array.isArray(data) ? data : [data]).filter(Boolean).map(simplifyLocation);
+    });
+    return formatResult(result);
   }
   if (name === "jdtls_references") {
-    const result = await getSession(args.workspaceRoot).positionRequest(
-      "textDocument/references",
-      args.filePath,
-      args.line,
-      args.character,
-      { context: { includeDeclaration: Boolean(args.includeDeclaration) } },
-    );
-    return formatResult((result || []).map(simplifyLocation));
+    const session = getSession(args.workspaceRoot);
+    const result = await session.runSemanticQuery(async () => {
+      const data = await session.positionRequest(
+        "textDocument/references",
+        args.filePath,
+        args.line,
+        args.character,
+        { context: { includeDeclaration: Boolean(args.includeDeclaration) } },
+      );
+      return (data || []).map(simplifyLocation);
+    });
+    return formatResult(result);
   }
   if (name === "jdtls_shutdown") {
     const root = normalizePath(args.workspaceRoot);
